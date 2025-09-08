@@ -1,43 +1,91 @@
 (function () {
-    console.log("Блокировка рекламы активирована");
+    // Сохраняем оригинальные реализации
+    const originalCreate = Document.prototype.createElement;
 
-    // Подменяем проверку подписки (премиум аккаунт)
-    window.Account = window.Account || {};
-    window.Account.hasPremium = () => true;
-
-    // Ломаем создание <video> для рекламы
-    document.createElement = new Proxy(document.createElement, {
-        apply(target, thisArg, args) {
-            if (args[0] === "video") {
-                console.log("Перехватываем создание <video> для рекламы!");
-
-                let fakeVideo = target.apply(thisArg, args);
-
-                // Запрещаем рекламе воспроизводиться
-                fakeVideo.play = function () {
-                    console.log("Рекламное видео заблокировано!");
-                    setTimeout(() => {
-                        fakeVideo.ended = true;
-                        fakeVideo.dispatchEvent(new Event("ended")); // Эмулируем завершение рекламы
-                    }, 500);
-                };
-
-                return fakeVideo;
-            }
-            return target.apply(thisArg, args);
-        }
-    });
-
-    // Очищаем таймеры рекламы
-    function clearAdTimers() {
-        console.log("Очищаем рекламные таймеры...");
-        let highestTimeout = setTimeout(() => {}, 0);
-        for (let i = 0; i <= highestTimeout; i++) {
-            clearTimeout(i);
-            clearInterval(i);
-        }
+    // Утилита: делаем функцию похожей на нативную (toString)
+    function makeNativeLike(fn, hint) {
+        try {
+            Object.defineProperty(fn, "toString", {
+                value: () => `function ${hint}() { [native code] }`,
+                configurable: true,
+                enumerable: false,
+                writable: false
+            });
+        } catch (e) { /* best-effort */ }
+        return fn;
     }
 
-    // Убираем рекламу после загрузки страницы
-    document.addEventListener("DOMContentLoaded", clearAdTimers);
+    // Обёртка для createElement: только для <video> меняем поведение play
+    const createElementWrapper = function (tagName, options) {
+        const element = originalCreate.call(this, tagName, options);
+
+        try {
+            if (String(tagName).toLowerCase() === "video") {
+                // Патчим play локально на экземпляре, делаем свойство не перечислимым
+                Object.defineProperty(element, "play", {
+                    configurable: true,
+                    enumerable: false,
+                    writable: true,
+                    value: function () {
+                        // Блокируем воспроизведение рекламы: мгновенно считаем, что видео завершилось
+                        try { this.pause && this.pause(); } catch (e) {}
+                        setTimeout(() => {
+                            try {
+                                this.ended = true;
+                                this.dispatchEvent(new Event("ended"));
+                            } catch (e) {}
+                        }, 200);
+                        // Возвращаем Promise-совместимый объект, как у HTMLMediaElement.play()
+                        try { return Promise.resolve(); } catch (e) { return; }
+                    }
+                });
+            }
+        } catch (e) { /* без поломки основного потока */ }
+
+        return element;
+    };
+
+    // Устанавливаем обёрнутую функцию на прототип документа, делая её "немного нативной"
+    try {
+        makeNativeLike(createElementWrapper, "createElement");
+        Object.defineProperty(Document.prototype, "createElement", {
+            value: createElementWrapper,
+            configurable: true,
+            writable: true,
+            enumerable: false
+        });
+    } catch (e) { /* fail silently */ }
+
+    // Скрытая (неперечисляемая, неизменяемая) реализация Account.hasPremium
+    try {
+        const acc = window.Account || (window.Account = {});
+        if (!acc.hasPremium || typeof acc.hasPremium !== "function" || acc.hasPremium() !== true) {
+            const hasPremiumFn = function () { return true; };
+            makeNativeLike(hasPremiumFn, "hasPremium");
+            Object.defineProperty(acc, "hasPremium", {
+                value: hasPremiumFn,
+                configurable: true,
+                enumerable: false,
+                writable: false
+            });
+        }
+    } catch (e) { /* best-effort */ }
+
+    // Очистка таймеров рекламы — запускается после загрузки документа
+    function clearAdTimers() {
+        try {
+            const highest = setTimeout(() => { }, 0);
+            for (let i = highest; i >= 0; i--) {
+                try { clearTimeout(i); } catch (e) { }
+                try { clearInterval(i); } catch (e) { }
+            }
+        } catch (e) { /* ignore */ }
+    }
+
+    if (document.readyState === "loading") {
+        document.addEventListener("DOMContentLoaded", clearAdTimers, { once: true });
+    } else {
+        // Документ уже загружен
+        clearAdTimers();
+    }
 })();
